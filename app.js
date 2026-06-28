@@ -347,7 +347,7 @@ const MEAL_PLAN_KEY = 'recipe_ingest_meal_plan';
 // placeholder below on the DEPLOYED copy (git short-SHA + UTC date); the dev/
 // un-deployed copy keeps the placeholder and renders 'dev'. (The token appears
 // here EXACTLY ONCE so the deploy-time sed has a single, unambiguous target.)
-const APP_VERSION = '21b367e 2026-06-28';
+const APP_VERSION = 'a1ec9e5 2026-06-28';
 // quick 260620-esf — ONE localStorage slot holding BOTH meal-plan UI prefs
 // (Add-recipes collapsed + per-day collapse map). UI-prefs ONLY; never touches
 // the CSV/IndexedDB store. Mirrors the MEAL_PLAN_KEY persist/restore idiom.
@@ -7860,8 +7860,12 @@ Alpine.data('app', () => ({
     // Phase 17 (Plan 17-02, D-05) — this funnel also persists SHARED fields
     // (cooksByDay/dayLeftovers/prepDoneByDay/regularsOverrides/adHocExtras/
     // orderScopeRange), so it triggers the debounced push too. A toggle of the
-    // local-only pickerCollapsed/dayCollapsedByDay also lands here; the resulting
-    // push merges to identical shared bytes (a debounced no-op), so it is safe.
+    // local-only pickerCollapsed/dayCollapsedByDay also lands here — but quick
+    // 260628-jq9 added Guard 1 to _schedulePlanPush(): it compares the projected
+    // shared doc to the last-synced base and returns BEFORE arming the push when
+    // only view-state changed, so a view-state-only toggle no longer flips
+    // "Syncing…" or produces a no-op commit. (Guard 2 in _pushPlanOnce() is the
+    // belt-and-braces no-op-commit skip for any push that does get armed.)
     if (!this._suppressPlanPush) this._schedulePlanPush();
   },
 
@@ -8122,6 +8126,21 @@ Alpine.data('app', () => ({
     const base = this._mealPlanBase || this._restoreMealPlanBase();
     const local = this.buildSharedPlanDoc();
     const merged = mergeMealPlan(base, local, freshRemote);
+    // quick 260628-jq9 — NO-OP guard. If the merge produced bytes identical to the
+    // current remote, there is nothing to commit; writing anyway creates a redundant
+    // commit (clutters Recent changes, flips "Syncing…"). Compare via coerce so the
+    // top-level key order matches (mergeMealPlan emits a different key order than
+    // coerceSharedPlanDoc, which is what freshRemote already is). SAFETY: a content
+    // difference ALWAYS shows in the stringify regardless of key order, so this never
+    // skips a real change (a key-order-only diff is a false-negative → a harmless
+    // redundant commit, i.e. exactly today's behaviour). Still adopt base/sha +
+    // reflect state so sync bookkeeping stays correct.
+    if (JSON.stringify(coerceSharedPlanDoc(merged)) === JSON.stringify(freshRemote)) {
+      this._mealPlanSha = sha;            // unchanged (undefined on a 404 no-op — file stays absent)
+      this._persistMealPlanBase(merged);  // adopt as base (idempotent; coerced inside)
+      this.applySharedPlanDoc(merged);    // reflect (harmless; equals current state)
+      return;
+    }
     // (3) LOCAL-first write (putJsonFile verify + auto-revert) then REMOTE.
     await putJsonFile('meal_plan.json', merged, { shapeCheck: this._jsonShapeCheckFor('meal_plan.json') });
     const message = this.buildCommitMessage({ action: 'sync', objectKind: 'meal plan', title: '', groupTag: 'plan' });
@@ -8160,6 +8179,18 @@ Alpine.data('app', () => ({
    */
   _schedulePlanPush() {
     if (!this.githubConnected || !this.githubToken) return; // nothing to sync to
+    // quick 260628-jq9 — skip arming a push when only LOCAL view-state changed.
+    // buildSharedPlanDoc() prunes view-state (collapsed/picker/dayCollapsed), so a
+    // collapse/picker toggle leaves the projection identical to the last-synced
+    // base. Arming a push for it would (a) flip "Syncing…" on every interaction and
+    // (b) produce a byte-identical no-op commit. Only schedule on a real shared
+    // change. Both sides are coerce/project key-order (base is always stored via
+    // _persistMealPlanBase → coerceSharedPlanDoc), so a plain JSON compare is valid.
+    // SAFETY: a genuine shared edit always alters the projection's CONTENT, so this
+    // can only skip view-state-only churn — never a real edit (worst case a key-order
+    // diff arms a push that Guard 2 then no-ops).
+    const baseDoc = this._mealPlanBase || this._restoreMealPlanBase();
+    if (JSON.stringify(this.buildSharedPlanDoc()) === JSON.stringify(baseDoc)) return;
     this._planPushPending = true;
     if (this._planPushTimer) { clearTimeout(this._planPushTimer); }
     this._planPushTimer = setTimeout(() => {
