@@ -347,7 +347,7 @@ const MEAL_PLAN_KEY = 'recipe_ingest_meal_plan';
 // placeholder below on the DEPLOYED copy (git short-SHA + UTC date); the dev/
 // un-deployed copy keeps the placeholder and renders 'dev'. (The token appears
 // here EXACTLY ONCE so the deploy-time sed has a single, unambiguous target.)
-const APP_VERSION = '3c2af8d 2026-06-28';
+const APP_VERSION = '5646e52 2026-06-28';
 // quick 260620-esf — ONE localStorage slot holding BOTH meal-plan UI prefs
 // (Add-recipes collapsed + per-day collapse map). UI-prefs ONLY; never touches
 // the CSV/IndexedDB store. Mirrors the MEAL_PLAN_KEY persist/restore idiom.
@@ -3215,6 +3215,16 @@ Alpine.data('app', () => ({
   // Plan 03's merge. Persisted in MEAL_PLAN_UI_KEY with an Array.isArray guard.
   // localStorage UI-prefs ONLY — NEVER an IndexedDB/CSV write.
   adHocExtras: [],
+  // quick 260628-v0i — per-PLAN recipe-line STRIKETHROUGH ("skip this shop"), a keyed
+  // map String(ingredient_id) → true. A struck recipe-derived line stays VISIBLE on the
+  // shopping list (rendered line-through) but is DROPPED from the text export. SHARED/
+  // synced (user decision) — rides the same MEAL_PLAN_UI_KEY persist + Phase-17 push as
+  // adHocExtras/regularsOverrides, and merges per-key delete-wins (SHARED_MAP_FIELDS).
+  recipeLineStrikes: {},
+  // quick 260628-v0i — TRANSIENT (NOT persisted, NOT synced): the "+ Add item" search
+  // box text for the Shopping tab. Drives the shoppingAddMatches getter; cleared after
+  // an add. MUST NOT enter _persistMealPlanUi/_restoreMealPlanUi.
+  shoppingAddQuery: '',
   // quick 260620-s49 — TRANSIENT (NOT persisted): the date key whose cooks popover
   // is currently open ('' = none open; one popover at a time). MUST NOT be added
   // to _persistMealPlanUi()/_restoreMealPlanUi() (mirrors mealPlanFiltersOpen).
@@ -7934,6 +7944,8 @@ Alpine.data('app', () => ({
         prepDoneByDay: this.prepDoneByDay,
         // phase 08 REG-07 — per-plan regulars overrides + ad-hoc extras.
         regularsOverrides: this.regularsOverrides,
+        // quick 260628-v0i — per-plan recipe-line strikethrough (shared keyed map).
+        recipeLineStrikes: this.recipeLineStrikes,
         adHocExtras: this.adHocExtras
       }));
     } catch (_e) {
@@ -8017,6 +8029,13 @@ Alpine.data('app', () => ({
         && !Array.isArray(parsed.regularsOverrides))
         ? parsed.regularsOverrides
         : {};
+      // quick 260628-v0i — restore recipeLineStrikes with the SAME plain-non-null-object
+      // guard the keyed-map siblings use; anything else (array/null) => {}.
+      this.recipeLineStrikes = (parsed.recipeLineStrikes
+        && typeof parsed.recipeLineStrikes === 'object'
+        && !Array.isArray(parsed.recipeLineStrikes))
+        ? parsed.recipeLineStrikes
+        : {};
       // phase 08 REG-07 — adHocExtras is an ARRAY; guard with Array.isArray, else [].
       this.adHocExtras = Array.isArray(parsed.adHocExtras) ? parsed.adHocExtras : [];
     } catch (_e) {
@@ -8029,6 +8048,7 @@ Alpine.data('app', () => ({
       this.prepDoneByDay = {}; // quick 260627-iy8 — fail-open to empty on corruption.
       // phase 08 REG-07 — fail-open: both reset to empty on any corruption.
       this.regularsOverrides = {};
+      this.recipeLineStrikes = {}; // quick 260628-v0i — fail-open to empty on corruption.
       this.adHocExtras = [];
     }
   },
@@ -8060,6 +8080,7 @@ Alpine.data('app', () => ({
       dayLeftovers: this.dayLeftovers,
       prepDoneByDay: this.prepDoneByDay,
       regularsOverrides: this.regularsOverrides,
+      recipeLineStrikes: this.recipeLineStrikes,
       adHocExtras: this.adHocExtras,
       orderScopeRange: this.orderScopeRange
     });
@@ -8119,6 +8140,7 @@ Alpine.data('app', () => ({
     this.dayLeftovers = safe.dayLeftovers;
     this.prepDoneByDay = safe.prepDoneByDay;
     this.regularsOverrides = safe.regularsOverrides;
+    this.recipeLineStrikes = safe.recipeLineStrikes;
     this.adHocExtras = safe.adHocExtras;
     this.orderScopeRange = safe.orderScopeRange;
   },
@@ -9279,6 +9301,10 @@ Alpine.data('app', () => ({
     //   metricByUnit: Map<unit, total>, wholeTotal, missingWhole:bool }.
     const acc = new Map();
     const unknown = new Map(); // name -> true (dedup by name)
+    // quick 260628-v0i — ids that got a RECIPE-derived contribution into `acc` (the loop
+    // below), so each emitted line can be tagged source:'recipe' vs source:'manual'
+    // (regulars/ad-hoc only). Drives the provenance-aware remove + the strikethrough gate.
+    const recipeContribIds = new Set();
 
     // quick 260613-aw1 — role split. acc/lines/unknown aggregate ONLY required
     // rows; non-required (optional/garnish/to_taste) rows go to a separate
@@ -9369,6 +9395,7 @@ Alpine.data('app', () => ({
           continue;
         }
         this._accumulateRow(this._ensureAccEntry(acc, iid, master, row), master, row);
+        recipeContribIds.add(iid); // quick 260628-v0i — provenance: this line is recipe-derived.
       }
     }
 
@@ -9380,6 +9407,7 @@ Alpine.data('app', () => ({
     // getter when an override / skip / extra changes (reactivity wiring — RESEARCH note).
     const _regularsOverrides = this.regularsOverrides;   // touch for reactivity (read below via String(iid))
     const _adHocExtras = this.adHocExtras;               // touch for reactivity (iterated below)
+    const _recipeLineStrikes = this.recipeLineStrikes;   // quick 260628-v0i — touch so a strike toggle re-runs this getter
 
     // 1. Regulars fold-in. For each master tagged regular AND not skipped this shop.
     for (const [iid, m] of masterById.entries()) {
@@ -9421,7 +9449,12 @@ Alpine.data('app', () => ({
     const lines = [];
     for (const [iid, a] of acc.entries()) {
       const { parts, caveat } = this._derivePartsCaveat(a);
-      lines.push({ ingredient_id: iid, ingredient_name: a.ingredient_name, parts, caveat, pantry_section: masterById.get(iid)?.pantry_section || '', packs: this._derivePackCount(parts, caveat, masterById.get(iid)), pack_size: masterById.get(iid)?.pack_size ?? null, pack_units: masterById.get(iid)?.pack_units ?? null, pack_unit_label: masterById.get(iid)?.pack_unit_label || '' }); // pack_units/pack_unit_label: quick 260615-kid
+      // quick 260628-v0i — provenance + strikethrough tags. source:'recipe' iff a recipe
+      // row contributed (else 'manual' = regulars/ad-hoc only); struck iff a recipe-derived
+      // line is in recipeLineStrikes (skip-this-shop). A struck line STAYS in `lines`
+      // (rendered line-through) but is dropped from the export (openShoppingExport).
+      const _isRecipe = recipeContribIds.has(iid);
+      lines.push({ ingredient_id: iid, ingredient_name: a.ingredient_name, parts, caveat, pantry_section: masterById.get(iid)?.pantry_section || '', packs: this._derivePackCount(parts, caveat, masterById.get(iid)), pack_size: masterById.get(iid)?.pack_size ?? null, pack_units: masterById.get(iid)?.pack_units ?? null, pack_unit_label: masterById.get(iid)?.pack_unit_label || '', source: _isRecipe ? 'recipe' : 'manual', struck: _isRecipe && _recipeLineStrikes[String(iid)] === true }); // pack_units/pack_unit_label: quick 260615-kid; source/struck: quick 260628-v0i
     }
 
     // quick 260613-aw1 — check-stock list: non-required items NOT bought as a
@@ -9675,6 +9708,83 @@ Alpine.data('app', () => ({
   isAdHocExtra(iid) {
     const n = Number(iid);
     return this.adHocExtras.some(x => Number(x && x.ingredient_id) === n);
+  },
+
+  /**
+   * isRecipeLineStruck / toggleRecipeLineStrike — quick 260628-v0i. The per-shop
+   * "skip this shop" strikethrough for a RECIPE-derived shopping line. Keyed by
+   * String(ingredient_id) in the SHARED recipeLineStrikes map (synced like
+   * regularsOverrides). A struck line stays visible (line-through) but is dropped
+   * from the order text export. Reversible; toggling persists + rides the push.
+   */
+  isRecipeLineStruck(iid) {
+    return this.recipeLineStrikes[String(Number(iid))] === true;
+  },
+  toggleRecipeLineStrike(iid) {
+    const k = String(Number(iid));
+    if (this.recipeLineStrikes[k] === true) {
+      delete this.recipeLineStrikes[k];
+    } else {
+      this.recipeLineStrikes[k] = true;
+    }
+    this._persistMealPlanUi();
+  },
+
+  /**
+   * shoppingAddMatches — quick 260628-v0i. Fuzzy ingredient matches for the "+ Add
+   * item" box, EXCLUDING ids already on the shopping list or already an ad-hoc extra
+   * (no dupes). Capped at 8. Empty when the query is blank or Fuse isn't ready.
+   */
+  get shoppingAddMatches() {
+    const q = (this.shoppingAddQuery || '').trim();
+    if (!q || !this.fuse) return [];
+    const onList = new Set((this.combinedShoppingList.lines || []).map(l => Number(l.ingredient_id)));
+    const out = [];
+    for (const hit of this.fuse.search(q)) {
+      const m = hit && hit.item;
+      if (!m || m.ingredient_id == null) continue;
+      const iid = Number(m.ingredient_id);
+      if (onList.has(iid) || this.isAdHocExtra(iid)) continue;
+      out.push({ ingredient_id: iid, ingredient_name: m.ingredient_name || '(unnamed ingredient)' });
+      if (out.length >= 8) break;
+    }
+    return out;
+  },
+
+  /**
+   * addShoppingItem — quick 260628-v0i. Add a chosen ingredient to the shopping list
+   * as an ad-hoc extra (the shared add path), then clear the search box. Guarded so a
+   * double-click can't toggle it back off.
+   */
+  addShoppingItem(iid) {
+    const n = Number(iid);
+    if (!this.isAdHocExtra(n)) this.toggleAdHocExtra(n);
+    this.shoppingAddQuery = '';
+  },
+
+  /**
+   * removeShoppingLine — quick 260628-v0i. Provenance-aware remove from the combined
+   * shopping list. A MANUALLY-added line (ad-hoc extra and/or a regular) is taken OFF
+   * the list (un-add the ad-hoc + skip the regular); a RECIPE-derived line is left on
+   * the list but STRUCK (skip-this-shop) so it drops from the export. The line object
+   * carries `source` ('recipe' | 'manual') from combinedShoppingList.
+   */
+  removeShoppingLine(line) {
+    if (!line || line.ingredient_id == null) return;
+    const iid = Number(line.ingredient_id);
+    if (line.source === 'recipe') {
+      this.toggleRecipeLineStrike(iid);
+      return;
+    }
+    // Manual line: un-add. Remove the ad-hoc extra if present...
+    if (this.isAdHocExtra(iid)) this.toggleAdHocExtra(iid);
+    // ...and skip a (non-skipped) regular so it leaves the list too.
+    const m = (Array.isArray(this.ingredientMaster) ? this.ingredientMaster : [])
+      .find(x => x && x.ingredient_id === iid);
+    if (m && m.regular === true && this.regularsOverrides[String(iid)]?.skip !== true) {
+      this.regularsOverrides[String(iid)] = { ...(this.regularsOverrides[String(iid)] || {}), skip: true };
+      this._persistMealPlanUi();
+    }
   },
 
   /**
@@ -10104,6 +10214,9 @@ Alpine.data('app', () => ({
     const needsSetup = [];
 
     for (const line of csl.lines) {
+      // quick 260628-v0i — a struck (skip-this-shop) recipe line stays on-screen but is
+      // EXCLUDED from the auto-shopper order text (neither ready nor needsSetup).
+      if (line.struck) continue;
       const p = packById.get(line.ingredient_id);
       const partTotal = line.parts.length === 1 ? Number(line.parts[0].total) : NaN;
       const partUnit = line.parts.length === 1 ? String(line.parts[0].unit || '').toLowerCase() : '';

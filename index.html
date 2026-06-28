@@ -2282,7 +2282,7 @@
             <h4 class="shopping-section-header" x-text="grp.section"></h4>
             <ul class="shopping-list-items">
               <template x-for="(line, i) in grp.items" :key="line.ingredient_id ?? i">
-                <li class="shopping-list-item">
+                <li class="shopping-list-item" :class="{ 'is-struck': line.struck }">
                   <!-- quick 260628-u6r — the ingredient NAME reverted to opening the
                        edit-ingredient modal (canEditIngredient gate; unmatched ids stay
                        a plain non-clickable span), undoing cg8's name-opens-link. The
@@ -2338,6 +2338,23 @@
                           x-cloak
                           title="This ingredient has no shopping link — it can't be ordered.">⛔</span>
                   </span>
+                  <!-- quick 260628-v0i — per-line REMOVE. A MANUAL line (regulars / ad-hoc /
+                       "+ Add item") is taken OFF the list (✕); a RECIPE line is struck
+                       "skip this shop" (✕ → line-through, dropped from the export) and is
+                       reversible (↺ "put back"). Both call the provenance-aware
+                       removeShoppingLine(line). Only for a matched id (a null-id row has
+                       nothing to remove). -->
+                  <button type="button" class="shopping-remove"
+                          x-show="line.ingredient_id != null"
+                          x-cloak
+                          @click="removeShoppingLine(line)"
+                          :title="line.source === 'recipe'
+                            ? (line.struck ? 'Put back on this shop' : 'Skip this shop (strike through; not ordered)')
+                            : 'Remove from the shopping list'"
+                          :aria-label="line.source === 'recipe'
+                            ? (line.struck ? 'Put back on this shop' : 'Skip this shop')
+                            : 'Remove from the shopping list'"
+                          x-text="line.struck ? '↺' : '✕'"></button>
                 </li>
               </template>
             </ul>
@@ -2355,6 +2372,28 @@
               </li>
             </template>
           </ul>
+        </div>
+        <!-- quick 260628-v0i — "+ Add item": search the ingredient master and add any
+             ingredient to the shopping list as an ad-hoc extra (generalises the
+             check-stock "+ add to shopping"; both write the synced adHocExtras). The
+             search text (shoppingAddQuery) is transient — not persisted, not synced.
+             Matches exclude anything already on the list / already added (no dupes). -->
+        <div class="shopping-add">
+          <input type="text" class="shopping-add-input" x-model="shoppingAddQuery"
+                 placeholder="+ Add an item to the list…"
+                 aria-label="Add an item to the shopping list">
+          <ul class="shopping-add-results" x-show="shoppingAddMatches.length > 0" x-cloak>
+            <template x-for="m in shoppingAddMatches" :key="m.ingredient_id">
+              <li class="shopping-add-result">
+                <span class="shopping-add-name" x-text="m.ingredient_name"></span>
+                <button type="button" class="add-shop"
+                        @click="addShoppingItem(m.ingredient_id)">+ add</button>
+              </li>
+            </template>
+          </ul>
+          <p class="help shopping-add-empty"
+             x-show="shoppingAddQuery.trim() && shoppingAddMatches.length === 0"
+             x-cloak>No match that isn't already on your list.</p>
         </div>
         <!-- quick 260625-s1g (X3) — Shopping panel footer: live-count summary +
              the re-parented "Open order list" export pill (bindings byte-identical). -->

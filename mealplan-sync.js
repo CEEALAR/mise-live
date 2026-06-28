@@ -17,6 +17,7 @@
 //     entries: [{ id, recipe_id, date, servings }],   // NO per-entry `collapsed` (view-state, local-only)
 //     cooksByDay, dayLeftovers, prepDoneByDay,         // keyed maps (by day)
 //     regularsOverrides,                               // keyed map (by ingredient_id)
+//     recipeLineStrikes,                               // keyed map (by ingredient_id) — skip-this-shop strikethrough (quick 260628-v0i)
 //     adHocExtras,                                     // keyed map (by id) OR array — see note
 //     orderScopeRange                                  // null | { startKey, endKey }
 //   }
@@ -28,7 +29,10 @@
 // plain objects keyed by day-string / ingredient_id. `adHocExtras` is an array
 // in the live state but is merged as an ARRAY-union below (D-03 id-union), not
 // as a keyed map — it is handled separately from MAP_FIELDS.
-export const SHARED_MAP_FIELDS = ['cooksByDay', 'dayLeftovers', 'prepDoneByDay', 'regularsOverrides'];
+// quick 260628-v0i — `recipeLineStrikes` ({ ingredient_id: true }) joins the keyed-map
+// family so the per-shop recipe-line strikethrough syncs between users by the SAME 3-way
+// per-key delete-wins rule (no bespoke merge — mergeMealPlan iterates this array).
+export const SHARED_MAP_FIELDS = ['cooksByDay', 'dayLeftovers', 'prepDoneByDay', 'regularsOverrides', 'recipeLineStrikes'];
 
 // The entry fields that ride the shared doc (NO `collapsed` — that is view-state).
 export const SHARED_ENTRY_FIELDS = ['id', 'recipe_id', 'date', 'servings'];
@@ -45,6 +49,7 @@ export function emptySharedPlanDoc() {
     dayLeftovers: {},
     prepDoneByDay: {},
     regularsOverrides: {},
+    recipeLineStrikes: {},
     adHocExtras: [],
     orderScopeRange: null
   };
@@ -80,6 +85,7 @@ export function projectSharedPlanDoc(state) {
     dayLeftovers: obj(s.dayLeftovers),
     prepDoneByDay: obj(s.prepDoneByDay),
     regularsOverrides: obj(s.regularsOverrides),
+    recipeLineStrikes: obj(s.recipeLineStrikes),
     adHocExtras: Array.isArray(s.adHocExtras) ? s.adHocExtras : [],
     orderScopeRange: (s.orderScopeRange
       && typeof s.orderScopeRange === 'object'
@@ -115,6 +121,7 @@ export function coerceSharedPlanDoc(raw) {
     dayLeftovers: obj(raw.dayLeftovers),
     prepDoneByDay: obj(raw.prepDoneByDay),
     regularsOverrides: obj(raw.regularsOverrides),
+    recipeLineStrikes: obj(raw.recipeLineStrikes),
     adHocExtras: Array.isArray(raw.adHocExtras) ? raw.adHocExtras : [],
     orderScopeRange: (raw.orderScopeRange
       && typeof raw.orderScopeRange === 'object'
