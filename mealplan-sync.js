@@ -184,6 +184,92 @@ export function mergeKeyedMap(base, local, remote) {
 }
 
 /**
+ * mergeCookListMap — list-aware 3-way merge for `cooksByDay` (quick 260629-dsq).
+ *
+ * WHY this differs from `mergeKeyedMap`: `cooksByDay[dateKey]` is NOT an opaque
+ * scalar — it is an ARRAY of cook APPID strings (multiple cooks can be assigned
+ * to one day). `mergeKeyedMap` treats each day's whole array as a single value
+ * and applies "side that changed wins", so one side's list replaces the other and
+ * any cook present only on the losing side is silently dropped. (Real-world
+ * trigger: a SINGLE user with the app open in MULTIPLE windows/devices — each
+ * window holds its own stale in-memory plan + cached merge-base, so a cook added
+ * in one window is lost when another stale window pushes its day-list.) This
+ * helper instead does a PER-DAY, per-cook-id 3-way UNION with delete-wins per id,
+ * mirroring the id-union spirit of `mergeEntries` / `mergeAdHocExtras`.
+ *
+ * Rules per day key (UNION of base/local/remote day-keys):
+ *   - KEY-level delete-wins (mirrors mergeKeyedMap): a key present in base but
+ *     ABSENT (key missing) on EITHER side is gone — skip it. (An emptied-to-`[]`
+ *     day is NOT "absent" — the key still exists and falls through to the per-id
+ *     union, yielding `[]`, which IS kept.)
+ *   - Brand-new key (not in base): keep it; union the lists of whichever sides
+ *     have it.
+ *   - Key in base + present on both sides: per-id 3-way union with delete-wins —
+ *     keep an id UNLESS it was in base AND removed on EITHER side. Every other id
+ *     (added on either side, or unchanged) is kept.
+ *
+ * KEEP-`[]` decision (load-bearing): a day key whose merged list is empty is
+ * KEPT, not dropped. `cooksForDay()` lazy-inits `this.cooksByDay[dateKey] = []`
+ * and `projectSharedPlanDoc` carries those empty arrays verbatim, so the merge
+ * MUST round-trip empty-list days unchanged — otherwise it would diverge from the
+ * projection and arm a spurious no-op push (jq9 guard). Only a genuinely DELETED
+ * key (the key itself removed vs base on a side) is dropped, per delete-wins.
+ *
+ * PURE: builds and returns a fresh object; never mutates base/local/remote.
+ *
+ * @param {object} base @param {object} local @param {object} remote
+ * @returns {object} merged `cooksByDay` map
+ */
+export function mergeCookListMap(base, local, remote) {
+  const b = base || {}, l = local || {}, r = remote || {};
+  const asList = (v) => (Array.isArray(v) ? v : []); // defensive: non-array => []
+  const keys = new Set([...Object.keys(b), ...Object.keys(l), ...Object.keys(r)]);
+  const out = {};
+  for (const k of keys) {
+    const inBase = Object.prototype.hasOwnProperty.call(b, k);
+    const inLocal = Object.prototype.hasOwnProperty.call(l, k);
+    const inRemote = Object.prototype.hasOwnProperty.call(r, k);
+
+    // KEY-level delete-wins (D-04): a key in base but removed (key missing) on
+    // EITHER side is gone. NB: an emptied-to-[] day still HAS the key, so it is
+    // not caught here — it falls through to the per-id union below and yields [].
+    if (inBase && (!inLocal || !inRemote)) continue;
+
+    const bl = asList(b[k]), ll = asList(l[k]), rl = asList(r[k]);
+
+    if (!inBase) {
+      // Brand-new day key (D-03 union at key level): union of whichever sides
+      // have it, deterministic order (local additions first, then remote-only).
+      const seen = new Set();
+      const merged = [];
+      for (const id of [...ll, ...rl]) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        merged.push(id);
+      }
+      out[k] = merged;
+      continue;
+    }
+
+    // Key existed in base and survives on both sides — per-id 3-way union with
+    // delete-wins: keep an id unless it was in base AND removed on EITHER side.
+    const lSet = new Set(ll), rSet = new Set(rl), bSet = new Set(bl);
+    const seen = new Set();
+    const merged = [];
+    // Deterministic order: surviving base ids first, then new-local, then new-remote.
+    for (const id of [...bl, ...ll, ...rl]) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      // delete-wins per id: in base but missing on either side => drop.
+      if (bSet.has(id) && (!lSet.has(id) || !rSet.has(id))) continue;
+      merged.push(id);
+    }
+    out[k] = merged; // emit even if empty ([] is KEPT — see KEEP-[] note above)
+  }
+  return out;
+}
+
+/**
  * mergeEntries — the entry-array 3-way merge (D-03 id-union, D-04 delete-wins).
  * Entries are keyed by `id`. Same rule as mergeKeyedMap but over an array indexed
  * by id, and the merged result keeps remote's ordering for surviving base/remote
@@ -256,8 +342,15 @@ export function mergeMealPlan(base, local, remote) {
     })()
   };
   for (const field of SHARED_MAP_FIELDS) {
+    // `cooksByDay` is a map of ARRAYS (per-day cook id lists), not opaque scalars,
+    // so it gets a list-aware merge — routing it through mergeKeyedMap would drop
+    // a cook present only on one side (quick 260629-dsq). It stays in
+    // SHARED_MAP_FIELDS (the constant remains a faithful list of synced map
+    // fields) and is special-cased here; the other four maps merge per-key.
+    if (field === 'cooksByDay') continue; // assigned via mergeCookListMap below
     merged[field] = mergeKeyedMap(B[field], L[field], R[field]);
   }
+  merged.cooksByDay = mergeCookListMap(B.cooksByDay, L.cooksByDay, R.cooksByDay);
   // adHocExtras is an ARRAY of id-bearing objects — merge by id like entries
   // (D-03 union, D-04 delete-wins). A non-id-bearing array degrades to a plain
   // union by JSON identity.
